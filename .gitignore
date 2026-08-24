@@ -1,0 +1,13 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+lib/
+*.tsbuildinfo
+*.tgz
+
+# Logs & temp
+*.log
+.tmp/
+.DS_Store
+Thumbs.db
