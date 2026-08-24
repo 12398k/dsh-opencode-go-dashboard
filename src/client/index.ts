@@ -1,11 +1,11 @@
 /**
  * @dsh-external/dsh-ocgo-usage — client 设置分区（settings.section slot）+ 输入框底栏快捷用量环（conversation.input.right slot）。
  *
- * 1. 设置页选项栏：Go 用量（额度进度条与多 Key / Cookie 凭据管理）
+ * 1. 设置页选项栏：Go 用量（额度进度条与多 Key / Cookie 凭据管理，支持 30s 自动刷新）
  * 2. 页面底栏（上下文窗口与模型选择器旁边）：
  *    - 严格对齐 DSH 原生规范（28px 高度、无突兀边框、原生 token 变量、完美垂直居中）
- *    - 圆形进度条展示 5h 滚动用量（带颜色阈值）
- *    - Hover 展开原生风格毛玻璃悬浮窗，查看 5h 滚动 / 7d 每周 / 30d 每月用量及重置倒计时
+ *    - 单账号时展示最纯净的【0% 5h】；多账号（≥2 个）时展示【最高 (池均值) 5h】
+ *    - Hover 展开原生风格毛玻璃悬浮窗，单账号展示精简卡片，多账号提供号池汇总与平铺细分
  */
 import React from 'react'
 
@@ -72,14 +72,16 @@ function shortErr(e: unknown): string {
   return String((e as any)?.message ?? e).slice(0, 160)
 }
 
-function fmtReset(w: AnyRecord | null): string {
+function fmtReset(w: AnyRecord | null, fetchedAt?: string): string {
   if (!w) return ''
   let ms: number | null = null
-  if (typeof w.resetInSec === 'number') ms = w.resetInSec * 1000
-  else if (typeof w.resetsAt === 'string' && !Number.isNaN(Date.parse(w.resetsAt))) {
+  if (typeof w.resetInSec === 'number') {
+    const elapsed = fetchedAt ? Date.now() - new Date(fetchedAt).getTime() : 0
+    ms = w.resetInSec * 1000 - elapsed
+  } else if (typeof w.resetsAt === 'string' && !Number.isNaN(Date.parse(w.resetsAt))) {
     ms = Date.parse(w.resetsAt) - Date.now()
   }
-  if (ms === null || ms <= 0) return ''
+  if (ms === null || ms <= 0) return '即将重置'
   const totalMin = Math.floor(ms / 60000)
   const d = Math.floor(totalMin / 1440)
   const h = Math.floor((totalMin % 1440) / 60)
@@ -99,7 +101,7 @@ function pctColor(p: number): string {
 
 // ─── 组件：用量行 ────────────────────────────────────────────────────────
 
-function UsageRow(props: { label: string; window: AnyRecord | null }): any {
+function UsageRow(props: { label: string; window: AnyRecord | null; fetchedAt?: string }): any {
   const h = React.createElement
   const w = props.window
   if (!w || typeof w.usagePercent !== 'number') {
@@ -109,7 +111,7 @@ function UsageRow(props: { label: string; window: AnyRecord | null }): any {
     )
   }
   const p = Math.round(w.usagePercent)
-  const reset = fmtReset(w)
+  const reset = fmtReset(w, props.fetchedAt)
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
     h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '12px' } },
       h('span', { style: { color: 'var(--dsw-alias-label-secondary, rgba(255,255,255,0.7))', fontWeight: 500 } }, props.label),
@@ -143,9 +145,9 @@ function UsageCard(props: { title: string; usage: AnyRecord | null }): any {
       h('strong', { style: { fontSize: '13px' } }, props.title),
       u?.plan ? h('span', { style: muted }, String(u.plan)) : null,
     ),
-    h(UsageRow, { label: '5h 滚动', window: u?.rolling ?? null }),
-    h(UsageRow, { label: '7d 每周', window: u?.weekly ?? null }),
-    h(UsageRow, { label: '30d 每月', window: u?.monthly ?? null }),
+    h(UsageRow, { label: '5h 滚动', window: u?.rolling ?? null, fetchedAt: u?.fetchedAt }),
+    h(UsageRow, { label: '7d 每周', window: u?.weekly ?? null, fetchedAt: u?.fetchedAt }),
+    h(UsageRow, { label: '30d 每月', window: u?.monthly ?? null, fetchedAt: u?.fetchedAt }),
     u?.error ? h('div', { style: errText }, String(u.error)) : null,
     u?.fetchedAt ? h('div', { style: { ...muted, fontSize: '11px' } }, `更新于 ${new Date(u.fetchedAt).toLocaleString()}`) : null,
   )
@@ -199,6 +201,7 @@ function ComposerGoQuota(): any {
   const [view, setView] = useStateShim(null as AnyRecord | null)
   const [hovered, setHovered] = useStateShim(false)
   const [refreshing, setRefreshing] = useStateShim(false)
+  const [, setTick] = useStateShim(0)
 
   const load = React.useCallback(async () => {
     try {
@@ -209,41 +212,64 @@ function ComposerGoQuota(): any {
 
   React.useEffect(() => {
     void load()
+    // 30 秒自动从 Host 抓取最新用量
     const timer = setInterval(() => {
       if (document.visibilityState === 'visible') void load()
-    }, 60000)
-    return () => clearInterval(timer)
+    }, 30000)
+    // 30 秒一次本地轻量 tick，刷新倒计时
+    const tickTimer = setInterval(() => {
+      setTick((t: number) => t + 1)
+    }, 30000)
+    return () => {
+      clearInterval(timer)
+      clearInterval(tickTimer)
+    }
   }, [load])
 
   const usageMap: Record<string, AnyRecord> = view?.usage ?? {}
   const usageKeys = Object.keys(usageMap)
   if (!view?.canQueryQuota && usageKeys.length === 0) return null
 
-  // 找最高的 5h 滚动用量（或主凭据用量）
-  let topRollingPercent = 0
-  let primaryUsage: AnyRecord | null = null
-  let primaryTitle = 'OpenCode Go'
-
   const apiKeys: AnyRecord[] = view?.apiKeys ?? []
   const accounts: AnyRecord[] = view?.accounts ?? []
 
+  // 整理所有凭据源的列表与号池聚合数据
+  let topRollingPercent = 0
+  let totalRollingSum = 0
+  let totalWeeklySum = 0
+  let totalMonthlySum = 0
+  let validAccountsCount = 0
+
+  const items: Array<{ id: string; title: string; usage: AnyRecord }> = []
+
   for (const [id, u] of Object.entries(usageMap)) {
-    if (u?.rolling && typeof u.rolling.usagePercent === 'number') {
-      if (primaryUsage === null || u.rolling.usagePercent >= topRollingPercent) {
-        topRollingPercent = Math.round(u.rolling.usagePercent)
-        primaryUsage = u
-        if (id.startsWith('key:')) {
-          const k = apiKeys.find((x) => x.id === id.slice(4))
-          primaryTitle = k?.label ? `Key (${k.label})` : 'API Key'
-        } else if (id === 'local') {
-          primaryTitle = '本机 Key'
-        } else {
-          const acc = accounts.find((a) => a.id === id)
-          primaryTitle = acc?.name ?? 'Cookie 账号'
-        }
-      }
+    let title = id
+    if (id.startsWith('key:')) {
+      const k = apiKeys.find((x) => x.id === id.slice(4))
+      title = k?.label ? `Key · ${k.label}` : 'API Key'
+    } else if (id === 'local') {
+      title = '本机 Key'
+    } else {
+      const acc = accounts.find((a) => a.id === id)
+      title = acc?.name ? `Cookie · ${acc.name}` : 'Cookie 账号'
     }
+
+    if (u?.rolling && typeof u.rolling.usagePercent === 'number') {
+      const p = Math.round(u.rolling.usagePercent)
+      if (p > topRollingPercent) topRollingPercent = p
+      totalRollingSum += p
+      if (u?.weekly?.usagePercent) totalWeeklySum += Math.round(u.weekly.usagePercent)
+      if (u?.monthly?.usagePercent) totalMonthlySum += Math.round(u.monthly.usagePercent)
+      validAccountsCount++
+    }
+    items.push({ id, title, usage: u })
   }
+
+  // 仅在真实账号数 >= 2 时判定为多账号号池
+  const isMultiAccount = items.length >= 2
+  const poolRollingAvg = validAccountsCount > 0 ? Math.round(totalRollingSum / validAccountsCount) : 0
+  const poolWeeklyAvg = validAccountsCount > 0 ? Math.round(totalWeeklySum / validAccountsCount) : 0
+  const poolMonthlyAvg = validAccountsCount > 0 ? Math.round(totalMonthlySum / validAccountsCount) : 0
 
   const handleManualRefresh = async (e: any) => {
     e.stopPropagation()
@@ -287,10 +313,18 @@ function ComposerGoQuota(): any {
         boxSizing: 'border-box',
       },
       onClick: handleManualRefresh,
-      title: '点击立即刷新 Go 额度',
+      title: isMultiAccount
+        ? `单号最高 5h: ${topRollingPercent}% | 号池均值: ${poolRollingAvg}% (共 ${items.length} 个账号)\n点击立即刷新`
+        : `5h 滚动用量: ${topRollingPercent}%\n点击立即刷新`,
     },
       h(CircularProgress, { percent: topRollingPercent, size: 14, strokeWidth: 2 }),
-      h('span', { style: { fontWeight: 500, color: pctColor(topRollingPercent), fontVariantNumeric: 'tabular-nums' } }, `${topRollingPercent}%`),
+      // 单账号时严格纯净输出「0% 5h」；多账号（≥2）时才展示「最高 (池均值)」
+      isMultiAccount
+        ? h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '3px' } },
+            h('span', { style: { fontWeight: 600, color: pctColor(topRollingPercent), fontVariantNumeric: 'tabular-nums' } }, `${topRollingPercent}%`),
+            h('span', { style: { opacity: 0.6, fontSize: '11px' } }, `(池${poolRollingAvg}%)`),
+          )
+        : h('span', { style: { fontWeight: 500, color: pctColor(topRollingPercent), fontVariantNumeric: 'tabular-nums' } }, `${topRollingPercent}%`),
       h('span', { style: { color: 'var(--dsw-alias-label-caption, rgba(128,128,128,0.7))', fontSize: '11px' } }, '5h'),
     ),
 
@@ -301,7 +335,9 @@ function ComposerGoQuota(): any {
             position: 'absolute',
             bottom: 'calc(100% + 8px)',
             right: 0,
-            width: '260px',
+            width: isMultiAccount ? '300px' : '260px',
+            maxHeight: '440px',
+            overflowY: 'auto',
             padding: '12px',
             background: 'var(--dsw-specific-menu, #1b1b1f)',
             color: 'var(--dsw-alias-label-primary, #fff)',
@@ -311,7 +347,7 @@ function ComposerGoQuota(): any {
             zIndex: 1000,
             display: 'flex',
             flexDirection: 'column',
-            gap: '10px',
+            gap: '12px',
             fontSize: '12px',
             backdropFilter: 'blur(16px)',
             cursor: 'default',
@@ -319,7 +355,9 @@ function ComposerGoQuota(): any {
         },
           // 悬浮窗头部
           h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
-            h('div', { style: { fontWeight: 600, fontSize: '12px', color: 'var(--dsw-alias-label-primary)' } }, 'OpenCode Go 用量'),
+            h('div', { style: { fontWeight: 600, fontSize: '12px', color: 'var(--dsw-alias-label-primary)' } },
+              isMultiAccount ? `OpenCode Go 号池 (${items.length} 个)` : 'OpenCode Go 用量',
+            ),
             h('button', {
               type: 'button',
               style: {
@@ -337,23 +375,65 @@ function ComposerGoQuota(): any {
             }, refreshing ? '刷新中…' : '↻ 刷新'),
           ),
 
-          // 悬浮窗主体条目
-          primaryUsage
+          // 多账号（≥2）时：展示号池总览聚合卡片
+          isMultiAccount
+            ? h('div', {
+                style: {
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px',
+                  padding: '10px',
+                  borderRadius: '8px',
+                  background: 'rgba(99, 102, 241, 0.12)',
+                  border: '1px solid rgba(99, 102, 241, 0.25)',
+                },
+              },
+                h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '11px', fontWeight: 600, color: 'var(--dsw-alias-label-primary)' } },
+                  h('span', null, '📊 号池平均水位'),
+                  h('span', { style: { color: pctColor(topRollingPercent) } }, `单号最高: ${topRollingPercent}%`),
+                ),
+                h(UsageRow, { label: '5h 均值', window: { usagePercent: poolRollingAvg } }),
+                h(UsageRow, { label: '7d 均值', window: { usagePercent: poolWeeklyAvg } }),
+                h(UsageRow, { label: '30d 均值', window: { usagePercent: poolMonthlyAvg } }),
+              )
+            : null,
+
+          // 悬浮窗主体条目（账号明细）
+          items.length > 0
             ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
-                h('div', { style: { fontSize: '11px', color: 'var(--dsw-alias-label-tertiary)' } }, `来源：${primaryTitle}`),
-                h(UsageRow, { label: '5h 滚动', window: primaryUsage?.rolling ?? null }),
-                h(UsageRow, { label: '7d 每周', window: primaryUsage?.weekly ?? null }),
-                h(UsageRow, { label: '30d 每月', window: primaryUsage?.monthly ?? null }),
-                primaryUsage?.fetchedAt
-                  ? h('div', {
-                      style: {
-                        color: 'var(--dsw-alias-label-tertiary)',
-                        fontSize: '10px',
-                        textAlign: 'right',
-                        marginTop: '2px',
-                      },
-                    }, `更新于 ${new Date(primaryUsage.fetchedAt).toLocaleTimeString()}`)
+                isMultiAccount
+                  ? h('div', { style: { fontSize: '11px', color: 'var(--dsw-alias-label-caption)', marginTop: '2px' } }, '账号明细：')
                   : null,
+                items.map((item) =>
+                  h('div', {
+                    key: item.id,
+                    style: {
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '8px',
+                      padding: isMultiAccount ? '8px' : '0',
+                      borderRadius: '8px',
+                      background: isMultiAccount ? 'var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,0.08))' : 'transparent',
+                    },
+                  },
+                    isMultiAccount
+                      ? h('div', { style: { fontSize: '11px', fontWeight: 600, color: 'var(--dsw-alias-label-secondary)' } }, item.title)
+                      : null,
+                    h(UsageRow, { label: '5h 滚动', window: item.usage?.rolling ?? null, fetchedAt: item.usage?.fetchedAt }),
+                    h(UsageRow, { label: '7d 每周', window: item.usage?.weekly ?? null, fetchedAt: item.usage?.fetchedAt }),
+                    h(UsageRow, { label: '30d 每月', window: item.usage?.monthly ?? null, fetchedAt: item.usage?.fetchedAt }),
+                    item.usage?.fetchedAt
+                      ? h('div', {
+                          style: {
+                            color: 'var(--dsw-alias-label-tertiary)',
+                            fontSize: '10px',
+                            textAlign: 'right',
+                            marginTop: '2px',
+                          },
+                        }, `更新于 ${new Date(item.usage.fetchedAt).toLocaleTimeString()}`)
+                      : null,
+                  ),
+                ),
               )
             : h('div', { style: { color: 'var(--dsw-alias-label-tertiary)', textAlign: 'center', padding: '8px 0' } }, '暂无额度数据，点击刷新'),
         )
@@ -414,10 +494,12 @@ function OcgoSection(): any {
   }
 
   const removeKey = async (id: string): Promise<void> => {
+    if (!window.confirm('确定要删除该 API Key 吗？')) return
     setBusy(true)
     try {
       await apiPost('/credentials/apikey/remove', { id })
       await loadState()
+      flash('API Key 已删除')
     } catch (e) { flash(shortErr(e), true) }
     finally { setBusy(false) }
   }
@@ -434,10 +516,12 @@ function OcgoSection(): any {
   }
 
   const removeAccount = async (id: string): Promise<void> => {
+    if (!window.confirm('确定要删除该账号凭据吗？')) return
     setBusy(true)
     try {
       await apiPost('/credentials/account/remove', { id })
       await loadState()
+      flash('账号凭据已删除')
     } catch (e) { flash(shortErr(e), true) }
     finally { setBusy(false) }
   }
@@ -468,7 +552,7 @@ function OcgoSection(): any {
       ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
           h('div', { style: row },
             h('button', { style: btn, onClick: () => void refreshQuota(), disabled: busy }, busy ? '刷新中…' : '↻ 刷新额度'),
-            h('span', { style: muted }, '每 5 分钟自动刷新'),
+            h('span', { style: muted }, '每 30 秒自动刷新'),
           ),
           !view?.canQueryQuota
             ? h('div', { style: card },

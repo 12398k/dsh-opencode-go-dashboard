@@ -29,7 +29,7 @@ type HostContext = Context & {
 export const name = "dsh-opencode-go-dashboard"
 export const inject = ['webServer', 'timer']
 
-const AUTO_REFRESH_MS = 5 * 60 * 1000
+const AUTO_REFRESH_MS = 30 * 1000
 
 const ROUTE_PREFIX = '/api/dsh-ocgo-usage'
 const STATE_DIR = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'ocgo-usage')
