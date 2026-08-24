@@ -1,0 +1,4 @@
+# Cordis profile patch: automatically mount the plugin entry when installed via dsh plugin add
+- insert:
+    - id: dsh-opencode-go-dashboard
+      name: 'dsh-opencode-go-dashboard'
