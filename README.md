@@ -6,9 +6,49 @@ DeepSeek Harness (DSH) 插件：**OpenCode Go 套餐用量监控与管理面板*
 
 ---
 
+## 🚀 安装
+
+### 方式一：终端命令行安装（推荐）
+
+在运行 DSH 的服务器或本机终端执行：
+
+```bash
+dsh plugin --profile web add dsh-opencode-go-dashboard@latest
+```
+
+安装完成后在浏览器中硬刷新 Web GUI（`Ctrl+Shift+R` 或 `Cmd+Shift+R`）即可生效。
+
+---
+
+### 方式二：让 DSH 智能体自动安装
+
+直接把下面这段话发给任意一个 DSH 会话：
+
+```text
+帮我安装 dsh-opencode-go-dashboard 插件（OpenCode Go 套餐用量监控），步骤：
+1. 在终端执行 dsh plugin --profile web add dsh-opencode-go-dashboard@latest
+2. 安装成功后提醒我硬刷新浏览器（Ctrl+Shift+R / Cmd+Shift+R）
+```
+
+---
+
+### 方式三：源码本地开发注入（无需 npm）
+
+在本地开发调试时，可通过超级注入器运行时免重启注入：
+
+```bash
+# 构建
+npm run build
+
+# 在 DSH 会话中调用工具注入
+dev_inject_plugin {"dir": "/绝对路径/dsh-opencode-go-dashboard"}
+```
+
+---
+
 ## ✨ 特性
 
-- ⚡ **对话底栏快捷用量环**：在底部输入框右侧（模型选择器旁）原生展示 **5h 滚动用量** 环形进度条，带颜色阈值警告（绿色正常 / 橙色告警 / 红色限速）。
+- ⚡ **对话底栏快捷用量环**：在底部输入框右侧（模型选择器旁）原生对齐展示 **5h 滚动用量** 环形进度条，带颜色阈值警告（绿色正常 / 橙色告警 / 红色限速）。
 - 🔍 **浮动悬窗详情 (Popover)**：鼠标悬停底栏圆环即可展示 5h / 7d / 30d 各档用量进度、百分比与精准重置倒计时。
 - ⚙️ **设置页管理面板**：在 Web GUI **设置 -> Go 用量** 分区中查看全部额度详情，并支持多凭据管理。
 - 🔑 **双查询通道支持**：
@@ -16,37 +56,6 @@ DeepSeek Harness (DSH) 插件：**OpenCode Go 套餐用量监控与管理面板*
   2. **网页 Cookie 通道**：支持录入多工作区 (`wrk_xxx`) 与 `auth` Cookie，走 SolidStart server-fn RPC 原生接口查询。
 - 🔄 **自动定时刷新**：后台每 5 分钟自动静默同步最新用量，底栏与设置页点击按钮可随时手动即时刷新。
 - 🔒 **本地私密安全**：所有凭据与用量缓存仅加密保存在本机 `~/.dsh/ocgo-usage/state.json`，不上传任何第三方服务。
-
----
-
-## 📦 安装与构建
-
-### 1. 构建插件
-
-```bash
-# 安装依赖
-npm install --legacy-peer-deps
-
-# 编译 Host 与 Client 产物
-npm run build
-```
-
-产物将输出在 `lib/` 目录下（`lib/index.js` 与 `lib/client.js`）。
-
-### 2. 在 DSH 中装配 / 注入
-
-在 DSH 会话中通过超级注入器工具加载：
-
-```bash
-# 运行时注入（立即生效）
-dev_inject_plugin {"dir": "/绝对路径/dsh-opencode-go-dashboard"}
-```
-
-或者打包发布为 tarball：
-
-```bash
-npm pack --cache .tmp/npm-cache
-```
 
 ---
 
