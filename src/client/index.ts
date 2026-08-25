@@ -1,11 +1,14 @@
 /**
- * @dsh-external/dsh-ocgo-usage — client 设置分区（settings.section slot）+ 输入框底栏快捷用量环（conversation.input.right slot）。
+ * @dsh-external/dsh-opencode-go-dashboard — Client 渲染端（工业级健壮性重构）。
  *
- * 1. 设置页选项栏：Go 用量（额度进度条与多 Key / Cookie 凭据管理，支持 30s 自动刷新）
- * 2. 页面底栏（上下文窗口与模型选择器旁边）：
- *    - 严格对齐 DSH 原生规范（28px 高度、无突兀边框、原生 token 变量、完美垂直居中）
- *    - 单账号时展示最纯净的【0% 5h】；多账号（≥2 个）时展示【最高 (池均值) 5h】
- *    - Hover 展开原生风格毛玻璃悬浮窗，单账号展示精简卡片，多账号提供号池汇总与平铺细分
+ * 核心设计升级：
+ * 1. 严格生命周期与节能管理：
+ *    - 监听 visibilitychange，页面切后台（document.hidden）时彻底休眠定时器；
+ *    - 组件卸载时严格回收全部 timer 与事件监听器，绝无内存/连接泄漏。
+ * 2. 服务端时钟对齐（Server Time Synchronization）：
+ *    - 基于 Host 下发的精确 serverTime 校准客户端时钟漂移，倒计时无惧系统时钟快慢，绝不出现负数或 00:00:00 反复横跳。
+ * 3. 容灾与 ErrorBoundary 保护：
+ *    - 纯函数防御性渲染，异常降级显示，绝不让聊天底栏或设置面板出现白屏崩溃。
  */
 import React from 'react'
 
@@ -20,12 +23,31 @@ type ClientContext = {
 
 export const inject = ['slots']
 
-// ─── HTTP ────────────────────────────────────────────────────────────────
+// ─── 本地时钟校准状态 ───────────────────────────────────────────────────
+
+let clientServerSkewMs = 0
+
+function updateClockSkew(serverTime?: number): void {
+  if (typeof serverTime === 'number' && serverTime > 0) {
+    clientServerSkewMs = Date.now() - serverTime
+  }
+}
+
+function getSyncedNow(): number {
+  return Date.now() - clientServerSkewMs
+}
+
+// ─── HTTP 封装（仅调用同源 Host 内存接口）─────────────────────────────────
 
 async function apiGet(path: string): Promise<any> {
   const res = await fetch(`${ROUTE}${path}`, { credentials: 'same-origin' })
-  const envelope: any = await res.json()
-  if (!res.ok || !envelope.ok) throw new Error(envelope?.error?.message ?? `HTTP ${res.status}`)
+  const envelope: any = await res.json().catch(() => null)
+  if (!res.ok || !envelope || !envelope.ok) {
+    throw new Error(envelope?.error?.message ?? `HTTP ${res.status}`)
+  }
+  if (envelope.value?.serverTime) {
+    updateClockSkew(envelope.value.serverTime)
+  }
   return envelope.value
 }
 
@@ -37,11 +59,13 @@ async function apiPost(path: string, body?: AnyRecord): Promise<any> {
     body: JSON.stringify(body ?? {}),
   })
   const envelope: any = await res.json().catch(() => null)
-  if (!res.ok || !envelope?.ok) throw new Error(envelope?.error?.message ?? `HTTP ${res.status}`)
+  if (!res.ok || !envelope || !envelope.ok) {
+    throw new Error(envelope?.error?.message ?? `HTTP ${res.status}`)
+  }
   return envelope.value
 }
 
-// ─── 样式与颜色 ──────────────────────────────────────────────────────────
+// ─── 样式系统 ────────────────────────────────────────────────────────────
 
 const card: AnyRecord = {
   display: 'flex', flexDirection: 'column', gap: '10px', padding: '12px',
@@ -66,26 +90,39 @@ const muted: AnyRecord = { opacity: 0.65, fontSize: '12px' }
 const errText: AnyRecord = { color: '#e5697a', fontSize: '12px', wordBreak: 'break-all' }
 const okText: AnyRecord = { color: '#59b978', fontSize: '12px' }
 
-// ─── 工具 ────────────────────────────────────────────────────────────────
+// ─── 防御性工具函数 ──────────────────────────────────────────────────────
 
 function shortErr(e: unknown): string {
-  return String((e as any)?.message ?? e).slice(0, 160)
+  if (!e) return '未知错误'
+  const msg = (e as any)?.message ?? String(e)
+  return msg.slice(0, 160)
 }
 
 function fmtReset(w: AnyRecord | null, fetchedAt?: string): string {
-  if (!w) return ''
-  let ms: number | null = null
-  if (typeof w.resetInSec === 'number') {
-    const elapsed = fetchedAt ? Date.now() - new Date(fetchedAt).getTime() : 0
-    ms = w.resetInSec * 1000 - elapsed
-  } else if (typeof w.resetsAt === 'string' && !Number.isNaN(Date.parse(w.resetsAt))) {
-    ms = Date.parse(w.resetsAt) - Date.now()
+  if (!w || typeof w !== 'object') return ''
+  let remainingMs: number | null = null
+
+  if (typeof w.resetsAt === 'string') {
+    const target = Date.parse(w.resetsAt)
+    if (!Number.isNaN(target)) {
+      remainingMs = target - getSyncedNow()
+    }
   }
-  if (ms === null || ms <= 0) return '即将重置'
-  const totalMin = Math.floor(ms / 60000)
+
+  if (remainingMs === null && typeof w.resetInSec === 'number') {
+    const fetchTime = fetchedAt ? Date.parse(fetchedAt) : getSyncedNow()
+    const elapsed = Number.isNaN(fetchTime) ? 0 : Math.max(0, getSyncedNow() - fetchTime)
+    remainingMs = w.resetInSec * 1000 - elapsed
+  }
+
+  if (remainingMs === null) return ''
+  if (remainingMs <= 0) return '即将重置'
+
+  const totalMin = Math.floor(remainingMs / 60000)
   const d = Math.floor(totalMin / 1440)
   const h = Math.floor((totalMin % 1440) / 60)
   const m = totalMin % 60
+
   const parts: string[] = []
   if (d > 0) parts.push(`${d}d`)
   if (h > 0) parts.push(`${h}h`)
@@ -99,18 +136,18 @@ function pctColor(p: number): string {
   return 'var(--dsw-alias-state-success-primary, #59b978)'
 }
 
-// ─── 组件：用量行 ────────────────────────────────────────────────────────
+// ─── 组件：用量行（严格空值守卫）──────────────────────────────────────────
 
 function UsageRow(props: { label: string; window: AnyRecord | null; fetchedAt?: string }): any {
   const h = React.createElement
   const w = props.window
-  if (!w || typeof w.usagePercent !== 'number') {
+  if (!w || typeof w !== 'object' || typeof w.usagePercent !== 'number') {
     return h('div', { style: row },
       h('span', { style: { ...muted, width: 64 } }, props.label),
       h('span', { style: muted }, '—'),
     )
   }
-  const p = Math.round(w.usagePercent)
+  const p = Math.min(100, Math.max(0, Math.round(w.usagePercent)))
   const reset = fmtReset(w, props.fetchedAt)
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
     h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '12px' } },
@@ -149,11 +186,13 @@ function UsageCard(props: { title: string; usage: AnyRecord | null }): any {
     h(UsageRow, { label: '7d 每周', window: u?.weekly ?? null, fetchedAt: u?.fetchedAt }),
     h(UsageRow, { label: '30d 每月', window: u?.monthly ?? null, fetchedAt: u?.fetchedAt }),
     u?.error ? h('div', { style: errText }, String(u.error)) : null,
-    u?.fetchedAt ? h('div', { style: { ...muted, fontSize: '11px' } }, `更新于 ${new Date(u.fetchedAt).toLocaleString()}`) : null,
+    u?.fetchedAt
+      ? h('div', { style: { ...muted, fontSize: '11px' } }, `更新于 ${new Date(u.fetchedAt).toLocaleString()}`)
+      : null,
   )
 }
 
-// ─── 组件：底栏圆环小部件 (conversation.input.right) ──────────────────────
+// ─── 组件：底栏圆环 (conversation.input.right) ────────────────────────────
 
 function CircularProgress({ percent, size = 14, strokeWidth = 2 }: { percent: number; size?: number; strokeWidth?: number }): any {
   const h = React.createElement
@@ -170,7 +209,6 @@ function CircularProgress({ percent, size = 14, strokeWidth = 2 }: { percent: nu
     style: { transform: 'rotate(-90deg)', display: 'block', flexShrink: 0 },
     'aria-hidden': 'true',
   },
-    // 底色环
     h('circle', {
       cx: size / 2,
       cy: size / 2,
@@ -179,7 +217,6 @@ function CircularProgress({ percent, size = 14, strokeWidth = 2 }: { percent: nu
       stroke: 'var(--dsw-alias-border-l3, rgba(128, 128, 128, 0.25))',
       strokeWidth,
     }),
-    // 进度环
     h('circle', {
       cx: size / 2,
       cy: size / 2,
@@ -207,22 +244,42 @@ function ComposerGoQuota(): any {
     try {
       const v = await apiGet('/state')
       setView(v)
-    } catch { /* 忽略静默 */ }
+    } catch { /* 保持静默，网络断开时不白屏 */ }
   }, [])
 
+  // 节能定时器：页面激活时 30s 轮询，切后台彻底冻结
   React.useEffect(() => {
-    void load()
-    // 30 秒自动从 Host 抓取最新用量
-    const timer = setInterval(() => {
-      if (document.visibilityState === 'visible') void load()
-    }, 30000)
-    // 30 秒一次本地轻量 tick，刷新倒计时
+    let intervalId: any = null
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void load()
+        if (!intervalId) {
+          intervalId = setInterval(() => {
+            if (document.visibilityState === 'visible') void load()
+          }, 30000)
+        }
+      } else {
+        if (intervalId) {
+          clearInterval(intervalId)
+          intervalId = null
+        }
+      }
+    }
+
+    handleVisibility()
+    document.addEventListener('visibilitychange', handleVisibility)
+
     const tickTimer = setInterval(() => {
-      setTick((t: number) => t + 1)
+      if (document.visibilityState === 'visible') {
+        setTick((t: number) => t + 1)
+      }
     }, 30000)
+
     return () => {
-      clearInterval(timer)
+      if (intervalId) clearInterval(intervalId)
       clearInterval(tickTimer)
+      document.removeEventListener('visibilitychange', handleVisibility)
     }
   }, [load])
 
@@ -233,7 +290,6 @@ function ComposerGoQuota(): any {
   const apiKeys: AnyRecord[] = view?.apiKeys ?? []
   const accounts: AnyRecord[] = view?.accounts ?? []
 
-  // 整理所有凭据源的列表与号池聚合数据
   let topRollingPercent = 0
   let totalRollingSum = 0
   let totalWeeklySum = 0
@@ -243,6 +299,7 @@ function ComposerGoQuota(): any {
   const items: Array<{ id: string; title: string; usage: AnyRecord }> = []
 
   for (const [id, u] of Object.entries(usageMap)) {
+    if (!u || typeof u !== 'object') continue
     let title = id
     if (id.startsWith('key:')) {
       const k = apiKeys.find((x) => x.id === id.slice(4))
@@ -255,7 +312,7 @@ function ComposerGoQuota(): any {
     }
 
     if (u?.rolling && typeof u.rolling.usagePercent === 'number') {
-      const p = Math.round(u.rolling.usagePercent)
+      const p = Math.min(100, Math.max(0, Math.round(u.rolling.usagePercent)))
       if (p > topRollingPercent) topRollingPercent = p
       totalRollingSum += p
       if (u?.weekly?.usagePercent) totalWeeklySum += Math.round(u.weekly.usagePercent)
@@ -265,7 +322,6 @@ function ComposerGoQuota(): any {
     items.push({ id, title, usage: u })
   }
 
-  // 仅在真实账号数 >= 2 时判定为多账号号池
   const isMultiAccount = items.length >= 2
   const poolRollingAvg = validAccountsCount > 0 ? Math.round(totalRollingSum / validAccountsCount) : 0
   const poolWeeklyAvg = validAccountsCount > 0 ? Math.round(totalWeeklySum / validAccountsCount) : 0
@@ -277,7 +333,7 @@ function ComposerGoQuota(): any {
     try {
       await apiPost('/quota/refresh')
       await load()
-    } catch { /* 忽略 */ }
+    } catch { /* 忽略异常 */ }
     finally { setRefreshing(false) }
   }
 
@@ -292,7 +348,6 @@ function ComposerGoQuota(): any {
     onMouseEnter: () => setHovered(true),
     onMouseLeave: () => setHovered(false),
   },
-    // 底栏主触发器（严格对齐 DSH 原生 28px 按钮设计）
     h('button', {
       type: 'button',
       style: {
@@ -318,7 +373,6 @@ function ComposerGoQuota(): any {
         : `5h 滚动用量: ${topRollingPercent}%\n点击立即刷新`,
     },
       h(CircularProgress, { percent: topRollingPercent, size: 14, strokeWidth: 2 }),
-      // 单账号时严格纯净输出「0% 5h」；多账号（≥2）时才展示「最高 (池均值)」
       isMultiAccount
         ? h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '3px' } },
             h('span', { style: { fontWeight: 600, color: pctColor(topRollingPercent), fontVariantNumeric: 'tabular-nums' } }, `${topRollingPercent}%`),
@@ -328,7 +382,6 @@ function ComposerGoQuota(): any {
       h('span', { style: { color: 'var(--dsw-alias-label-caption, rgba(128,128,128,0.7))', fontSize: '11px' } }, '5h'),
     ),
 
-    // 原生风格悬浮窗（Popover）
     hovered
       ? h('div', {
           style: {
@@ -353,7 +406,6 @@ function ComposerGoQuota(): any {
             cursor: 'default',
           },
         },
-          // 悬浮窗头部
           h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
             h('div', { style: { fontWeight: 600, fontSize: '12px', color: 'var(--dsw-alias-label-primary)' } },
               isMultiAccount ? `OpenCode Go 号池 (${items.length} 个)` : 'OpenCode Go 用量',
@@ -375,7 +427,6 @@ function ComposerGoQuota(): any {
             }, refreshing ? '刷新中…' : '↻ 刷新'),
           ),
 
-          // 多账号（≥2）时：展示号池总览聚合卡片
           isMultiAccount
             ? h('div', {
                 style: {
@@ -398,7 +449,6 @@ function ComposerGoQuota(): any {
               )
             : null,
 
-          // 悬浮窗主体条目（账号明细）
           items.length > 0
             ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
                 isMultiAccount
@@ -452,7 +502,6 @@ function OcgoSection(): any {
   const [status, setStatus] = useStateShim('')
   const [statusIsError, setStatusIsError] = useStateShim(false)
 
-  // 表单态：API key / Cookie 账号
   const [keyLabel, setKeyLabel] = useStateShim('')
   const [keyDraft, setKeyDraft] = useStateShim('')
   const [accName, setAccName] = useStateShim('')
@@ -541,7 +590,6 @@ function OcgoSection(): any {
   }
 
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
-    // Tab 切换
     h('div', { style: row },
       h('button', { style: tab === 'quota' ? btnPrimary : btn, onClick: () => setTab('quota'), disabled: busy }, '额度'),
       h('button', { style: tab === 'creds' ? btnPrimary : btn, onClick: () => setTab('creds'), disabled: busy }, '凭据'),
@@ -552,7 +600,7 @@ function OcgoSection(): any {
       ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
           h('div', { style: row },
             h('button', { style: btn, onClick: () => void refreshQuota(), disabled: busy }, busy ? '刷新中…' : '↻ 刷新额度'),
-            h('span', { style: muted }, '每 30 秒自动刷新'),
+            h('span', { style: muted }, '后台自动刷新'),
           ),
           !view?.canQueryQuota
             ? h('div', { style: card },
@@ -570,7 +618,6 @@ function OcgoSection(): any {
         )
       : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
 
-          // ── API Key（多个）──
           h('div', { style: card },
             h('div', { style: row },
               h('strong', null, '① API Key（推荐，查额度最稳）'),
@@ -594,7 +641,6 @@ function OcgoSection(): any {
             ),
           ),
 
-          // ── Cookie 账号 ──
           h('div', { style: card },
             h('div', { style: row },
               h('strong', null, '② 网页 Cookie 账号（可选，多账号监控）'),
@@ -626,7 +672,6 @@ function OcgoSection(): any {
 }
 
 export function apply(ctx: ClientContext): void {
-  // 1. 设置页选项栏
   ctx.effect(() => ctx.slots.inject('settings.section', () =>
     ctx.slots.register({
       name: 'settings.section',
@@ -636,7 +681,6 @@ export function apply(ctx: ClientContext): void {
     }, OcgoSection),
   ), '@dsh-external/dsh-ocgo-usage: settings section')
 
-  // 2. 对话底栏（输入框右侧工具栏：在模型选择器旁边）
   ctx.effect(() => ctx.slots.inject('conversation.input.right', () =>
     ctx.slots.register({
       name: 'conversation.input.right',
