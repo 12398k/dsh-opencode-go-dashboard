@@ -14,6 +14,7 @@ cd "$ROOT"
 CHECKOUT="${DSH_CHECKOUT:-}"
 if [ -z "$CHECKOUT" ]; then
   for candidate in \
+    "/home/qiyu/.nvm/versions/node/v22.22.2/lib/node_modules/@deepseek-ai/dsh" \
     "$HOME/dsh-harness" "$HOME/dsh" "$HOME/.dsh/dsh-harness" \
     "$(dirname "$(dirname "$(command -v dsh 2>/dev/null || true)")")" \
     "${DSH_GLOBAL_DIR:-}" ; do
@@ -32,8 +33,9 @@ fi
 
 if [ -d "$CHECKOUT/packages" ]; then LAYOUT=source; else LAYOUT=installed; fi
 
-if   [ -x "$CHECKOUT/node_modules/.bin/tsc" ]; then TSC="$CHECKOUT/node_modules/.bin/tsc"
-elif [ -x "$ROOT/node_modules/.bin/tsc" ];    then TSC="$ROOT/node_modules/.bin/tsc"
+if   [ -f "$ROOT/node_modules/typescript/bin/tsc" ]; then TSC="node $ROOT/node_modules/typescript/bin/tsc"
+elif [ -x "$ROOT/node_modules/.bin/tsc" ];            then TSC="$ROOT/node_modules/.bin/tsc"
+elif [ -x "$CHECKOUT/node_modules/.bin/tsc" ];        then TSC="$CHECKOUT/node_modules/.bin/tsc"
 else echo "build: tsc not found (checkout or local devDependencies)" >&2; exit 1
 fi
 
@@ -87,11 +89,11 @@ else
   fi
 fi
 
-echo "=== Compiling src → lib ($TSC) ==="
-"$TSC" -p tsconfig.json
+echo "=== Compiling src → lib ==="
+$TSC -p tsconfig.json
 
-if [ -f tsdown.config.ts ] && [ -x "$ROOT/node_modules/.bin/tsdown" ]; then
+if [ -f tsdown.config.ts ] && [ -e "$ROOT/node_modules/tsdown" ]; then
   echo "=== Building client bundle (tsdown) ==="
-  npm run build:client --silent
+  node "$ROOT/node_modules/tsdown/dist/run.mjs"
 fi
 echo "=== Build complete ==="
