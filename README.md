@@ -98,7 +98,7 @@ AGY_CLIENT_ID=你的 Google OAuth Client ID
 AGY_CLIENT_SECRET=你的 Google OAuth Client Secret
 ```
 
-取值可从本机已装好的 Antigravity CLI / cliproxy 的 OAuth 配置里复制（`~/.antigravity/`、`cliproxy/auths/` 等处通常已有）。改完**重启 dsh** 生效；若两项缺失，Antigravity 的自动续期与「网页一键授权」会直接返回该提示，但不影响已缓存 access token 的读取。
+取值可从本机已装好的 Antigravity CLI / cliproxy 的 OAuth 配置里复制（`~/.antigravity/`、`cliproxy/auths/` 等处通常已有）。进程环境优先，缺失时插件会直接兜底解析 `~/.dsh/.env`，因此**写入后无需重启 dsh**，点一次「刷新」即可生效；若两项都缺失，Antigravity 的自动续期与「网页一键授权」会直接返回该提示，但不影响已缓存 access token 的读取。
 
 ### 配置 Antigravity OAuth 凭证
 在 **设置 -> Go / Agy 用量 -> 凭据管理 -> Google Antigravity**：
@@ -149,7 +149,7 @@ npm test            # 路由判定 + 设置页渲染回归测试（26 项断言�
 `Fe26...` Cookie 属于会话态，退出 opencode 控制台登录后即失效，重新复制一次即可。
 
 **Antigravity 提示「未配置 Antigravity OAuth 客户端凭证」**
-按「使用指南」第一步把 `AGY_CLIENT_ID` / `AGY_CLIENT_SECRET` 写进 `~/.dsh/.env` 并重启 dsh 即可；已缓存的 access token 在此之前仍可正常读取。
+按「使用指南」第一步把 `AGY_CLIENT_ID` / `AGY_CLIENT_SECRET` 写进 `~/.dsh/.env` 即可（插件直接读取该文件，无需重启）；若你的宿主版本较旧，重启一次 dsh。已缓存的 access token 在此提示期间仍可正常读取。
 
 **Antigravity 提示 Token 失效**
 插件会用内置 Client ID 自动续期；若 Refresh Token 本身被撤销（改密码 / 撤销授权），需要重新导入或走「网页一键授权」。
@@ -163,6 +163,7 @@ npm test            # 路由判定 + 设置页渲染回归测试（26 项断言�
 
 ### 0.2.0
 - 新增 **Google Antigravity (Gemini) 双擎**：Google OAuth 自动续期、多账号（`qiyu (agy)` / `wym (agy-cli)`）精准归属、`retrieveUserQuotaSummary` 真实配额与重置时间。
+- Google OAuth 客户端凭证改由 `AGY_CLIENT_ID` / `AGY_CLIENT_SECRET` 提供（优先进程环境，兜底解析 `~/.dsh/.env`），源码与 npm 包内不保存明文密钥。
 - 新增**供应商路由策略**：智能自动识别 / 按供应商精确绑定 / 正则匹配规则（可增删、停用、恢复默认），并按 `手动切换 > 固定模式 > 精确绑定 > 正则 > 自动识别` 的优先级判定，界面提供「实时自检」。
 - 重构底栏圆环与悬浮卡片：点击展开常驻面板、点击外部关闭、卡片内一键切源，倒计时与宿主机时钟对齐。
 - 刷新调度升级为 30 秒基准 + 指数退避（最长 5 分钟），降低 429 概率。

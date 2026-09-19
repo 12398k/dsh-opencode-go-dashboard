@@ -42,14 +42,46 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 
 /**
  * Antigravity（Google OAuth）客户端凭证从环境变量读取，源码内不保留任何明文密钥。
- * 取值优先级：`~/.dsh/.env` / 项目 `.env` / 进程环境（`dsh` 启动时按层合并）。
+ * 取值优先级：进程环境（dsh 启动时按层合并 `~/.dsh/.env` / 项目 `.env`）
+ * → 兜底直接读取 `.env` 文件，让运行中补写凭证的实例无需立刻重启。
  */
-const GOOGLE_CLIENT_ID = String(process.env.AGY_CLIENT_ID || '').trim()
-const GOOGLE_CLIENT_SECRET = String(process.env.AGY_CLIENT_SECRET || '').trim()
+const ANTIGRAVITY_CREDENTIAL_KEYS = ['AGY_CLIENT_ID', 'AGY_CLIENT_SECRET'] as const
+
+function readEnvFileValue(key: string): string {
+  const candidates = [
+    join(process.env.DSH_HOME || join(homedir(), '.dsh'), '.env'),
+    join(process.cwd(), '.env'),
+  ]
+  for (const file of candidates) {
+    try {
+      if (!existsSync(file)) continue
+      for (const line of readFileSync(file, 'utf8').split(/\r?\n/)) {
+        const trimmed = line.trim()
+        if (!trimmed || trimmed.startsWith('#')) continue
+        const eq = trimmed.indexOf('=')
+        if (eq <= 0) continue
+        if (trimmed.slice(0, eq).trim() !== key) continue
+        let value = trimmed.slice(eq + 1).trim()
+        if (value.length > 1 && (value.startsWith('"') && value.endsWith('"') || value.startsWith("'") && value.endsWith("'"))) {
+          value = value.slice(1, -1)
+        }
+        if (value) return value
+      }
+    } catch { /* 容错：读不到就退回进程环境 */ }
+  }
+  return ''
+}
+
+/** 按需读取 OAuth 凭证（不缓存，支持运行中补配置） */
+function resolveGoogleOAuth(): { clientId: string; clientSecret: string } {
+  const pick = (key: string): string =>
+    String(process.env[key] || '').trim() || readEnvFileValue(key)
+  return { clientId: pick(ANTIGRAVITY_CREDENTIAL_KEYS[0]), clientSecret: pick(ANTIGRAVITY_CREDENTIAL_KEYS[1]) }
+}
 
 /** OAuth 凭证缺失时的统一提示（自动续期与一键授权都需要它） */
 const OAUTH_CREDENTIAL_HINT =
-  '未配置 Antigravity OAuth 客户端凭证：请在 ~/.dsh/.env 中设置 AGY_CLIENT_ID 与 AGY_CLIENT_SECRET（可从本机 Antigravity CLI / cliproxy 的 OAuth 配置复制），保存后重启 dsh 生效'
+  '未配置 Antigravity OAuth 客户端凭证：请在 ~/.dsh/.env 中设置 AGY_CLIENT_ID 与 AGY_CLIENT_SECRET（可从本机 Antigravity CLI / cliproxy 的 OAuth 配置复制）后重试'
 const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token'
 const GOOGLE_AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth'
 const GOOGLE_USERINFO_ENDPOINT = 'https://www.googleapis.com/oauth2/v2/userinfo?alt=json'
@@ -698,8 +730,9 @@ function discoverLocalAntigravityAccounts(): AntigravityAccount[] {
 
 /** 刷新 Antigravity OAuth Token */
 async function refreshAntigravityToken(acc: AntigravityAccount): Promise<string> {
+  const oauth = resolveGoogleOAuth()
   // 未配置客户端凭证时无法续期：未过期的 accessToken 仍可继续使用
-  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+  if (!oauth.clientId || !oauth.clientSecret) {
     if (acc.accessToken && (!acc.expiresAt || acc.expiresAt - Date.now() > 60_000)) return acc.accessToken
     throw new Error(OAUTH_CREDENTIAL_HINT)
   }
@@ -709,8 +742,8 @@ async function refreshAntigravityToken(acc: AntigravityAccount): Promise<string>
   }
 
   const params = new URLSearchParams()
-  params.append('client_id', GOOGLE_CLIENT_ID)
-  params.append('client_secret', GOOGLE_CLIENT_SECRET)
+  params.append('client_id', oauth.clientId)
+  params.append('client_secret', oauth.clientSecret)
   params.append('grant_type', 'refresh_token')
   params.append('refresh_token', acc.refreshToken)
 
@@ -1411,15 +1444,17 @@ export function apply(ctx: HostContext): void {
 
         // Google OAuth 辅助
         if (req.method === 'GET' && path === '/antigravity/oauth/auth-url') {
-          if (!GOOGLE_CLIENT_ID) return jsonErr(res, OAUTH_CREDENTIAL_HINT, 400)
+          const authOauth = resolveGoogleOAuth()
+          if (!authOauth.clientId) return jsonErr(res, OAUTH_CREDENTIAL_HINT, 400)
           const redirectUri = `${url.origin}${ROUTE_PREFIX}/antigravity/oauth/callback`
-          const authUrl = `${GOOGLE_AUTH_ENDPOINT}?client_id=${encodeURIComponent(GOOGLE_CLIENT_ID)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(GOOGLE_SCOPES.join(' '))}&access_type=offline&prompt=consent`
-          jsonOk(res, { authUrl, clientId: GOOGLE_CLIENT_ID, redirectUri })
+          const authUrl = `${GOOGLE_AUTH_ENDPOINT}?client_id=${encodeURIComponent(authOauth.clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(GOOGLE_SCOPES.join(' '))}&access_type=offline&prompt=consent`
+          jsonOk(res, { authUrl, clientId: authOauth.clientId, redirectUri })
           return
         }
         if (req.method === 'POST' && path === '/antigravity/oauth/exchange') {
           if (!sameOrigin(req)) return jsonErr(res, 'cross-origin rejected', 403)
-          if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) return jsonErr(res, OAUTH_CREDENTIAL_HINT, 400)
+          const exchangeOauth = resolveGoogleOAuth()
+          if (!exchangeOauth.clientId || !exchangeOauth.clientSecret) return jsonErr(res, OAUTH_CREDENTIAL_HINT, 400)
           const body = await readBody(req)
           const code = String(body.code ?? '').trim()
           const redirectUri = String(body.redirectUri ?? `${url.origin}${ROUTE_PREFIX}/antigravity/oauth/callback`).trim()
@@ -1427,8 +1462,8 @@ export function apply(ctx: HostContext): void {
 
           const params = new URLSearchParams()
           params.append('code', code)
-          params.append('client_id', GOOGLE_CLIENT_ID)
-          params.append('client_secret', GOOGLE_CLIENT_SECRET)
+          params.append('client_id', exchangeOauth.clientId)
+          params.append('client_secret', exchangeOauth.clientSecret)
           params.append('redirect_uri', redirectUri)
           params.append('grant_type', 'authorization_code')
 
